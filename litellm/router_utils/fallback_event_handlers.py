@@ -14,6 +14,7 @@ from litellm.router_utils.add_retry_fallback_headers import (
     get_fallback_error_info,
 )
 from litellm.router_utils.batch_utils import _get_router_metadata_variable_name
+from litellm.router_utils.common_utils import resolve_model_group_alias
 from litellm.router_utils.cooldown_handlers import (
     _first_present,  # pyright: ignore[reportPrivateUsage] - shared internal helper, used across router_utils
     _set_cooldown_deployments,  # pyright: ignore[reportPrivateUsage] - shared helper, used across router_utils
@@ -35,6 +36,45 @@ else:
 # Status codes a generic API call's caller-supplied resource id can trigger on its own
 # (e.g. a nonexistent file/batch/thread id), independent of the selected deployment's health.
 _REQUEST_SCOPED_STATUS_CODES: Final = frozenset((404,))
+_ROUTER_METADATA_BUCKETS: Final = ("metadata", "litellm_metadata")
+_TEAM_ID_METADATA_KEY: Final = "user_api_key_team_id"
+
+
+def get_authenticated_team_context(request_kwargs: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return the effective authenticated team ID and the metadata bucket that supplied it."""
+    for bucket_name in _ROUTER_METADATA_BUCKETS:
+        bucket = request_kwargs.get(bucket_name)
+        if not isinstance(bucket, Mapping):
+            continue
+        team_id = bucket.get(_TEAM_ID_METADATA_KEY)
+        if isinstance(team_id, str):
+            return team_id, bucket_name
+    return None, None
+
+
+def preserve_authenticated_team_context(
+    request_kwargs: dict[str, Any],
+    authenticated_team_id: str | None,
+    source_bucket: str | None,
+) -> None:
+    """Prevent fallback overrides from changing or introducing the authenticated team ID."""
+    for bucket_name in _ROUTER_METADATA_BUCKETS:
+        bucket = request_kwargs.get(bucket_name)
+        if not isinstance(bucket, Mapping):
+            continue
+        updated_bucket = dict(bucket)
+        if authenticated_team_id is None:
+            updated_bucket.pop(_TEAM_ID_METADATA_KEY, None)
+        else:
+            updated_bucket[_TEAM_ID_METADATA_KEY] = authenticated_team_id
+        request_kwargs[bucket_name] = updated_bucket
+
+    if authenticated_team_id is not None:
+        authoritative_bucket = source_bucket if source_bucket in _ROUTER_METADATA_BUCKETS else "metadata"
+        bucket = request_kwargs.get(authoritative_bucket)
+        updated_bucket = dict(bucket) if isinstance(bucket, Mapping) else {}
+        updated_bucket[_TEAM_ID_METADATA_KEY] = authenticated_team_id
+        request_kwargs[authoritative_bucket] = updated_bucket
 
 
 def _trigger_cooldown_for_failed_deployment(
@@ -335,8 +375,13 @@ async def run_async_fallback(
     metadata_variable_name: Final = _get_router_metadata_variable_name(
         function_name=getattr(kwargs.get("original_function"), "__name__", None)
     )
+    authenticated_team_id, authenticated_team_bucket = get_authenticated_team_context(kwargs)
     same_model_group_only: Final = references_provider_scoped_resource(kwargs) or creates_provider_scoped_resource(
         kwargs
+    )
+    alias_map: Final = getattr(litellm_router, "model_group_alias", None)
+    canonical_original_model_group: Final = (
+        resolve_model_group_alias(alias_map, original_model_group) or original_model_group
     )
     # Read out of kwargs and narrowed here rather than declared as a parameter: every caller
     # reaches this function by spreading a loosely-typed kwargs dict, so a declared parameter
@@ -348,9 +393,15 @@ async def run_async_fallback(
     attempted.record(original_model_group)
 
     for mg in fallback_model_group:
-        if mg == original_model_group:
+        target_model_group: Final = _get_fallback_target_model_group(mg)
+        canonical_target_model_group: Final = (
+            resolve_model_group_alias(alias_map, target_model_group) or target_model_group
+            if isinstance(target_model_group, str)
+            else None
+        )
+        if isinstance(mg, str) and canonical_target_model_group == canonical_original_model_group:
             continue
-        if same_model_group_only and _get_fallback_target_model_group(mg) != original_model_group:
+        if same_model_group_only and canonical_target_model_group != canonical_original_model_group:
             verbose_router_logger.info(
                 "Skipping fallback to model_group = %s: request is pinned to model_group = %s by its uploaded file",
                 mask_sensitive_structure(mg),
@@ -374,6 +425,11 @@ async def run_async_fallback(
                 kwargs["model"] = mg
             elif isinstance(mg, dict):
                 kwargs.update(mg)
+            preserve_authenticated_team_context(
+                request_kwargs=kwargs,
+                authenticated_team_id=authenticated_team_id,
+                source_bucket=authenticated_team_bucket,
+            )
             kwargs[metadata_variable_name] = {
                 **(kwargs.get(metadata_variable_name) or {}),
                 "model_group": kwargs.get("model", None),
