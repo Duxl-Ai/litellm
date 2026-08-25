@@ -355,7 +355,7 @@ async def run_async_fallback(
             already made for this request, created on the first hop and shared by reference
             for the rest of the walk. A target already in it is skipped, so neither a
             fallback graph that loops back on itself nor a client-side fallback list
-            re-walked at each level can repeat an attempt that has already failed. Identity
+            re-walked at each level of the recursion can repeat an attempt that has already failed. Identity
             comes from `fallback_attempt_key`, so an entry that overrides request params or
             re-targets the failed group with a different deployment selection stays distinct
             from a bare name.
@@ -528,30 +528,27 @@ async def log_failure_fallback_event(original_model_group: str, kwargs: dict, or
             verbose_router_logger.error("Error in log_failure_fallback_event: %s", e)
 
 
+def _is_non_standard_fallback_target(item: Any) -> bool:
+    if isinstance(item, str):
+        return True
+    if not isinstance(item, dict):
+        return False
+    model = item.get("model")
+    return isinstance(model, str)
+
+
 def _check_non_standard_fallback_format(fallbacks: list[Any] | None) -> bool:
     """
-    Checks if the fallbacks list is a list of strings or a list of dictionaries.
+    Checks whether ``fallbacks`` is a direct ordered list of fallback targets.
 
-    If
-    - List[str]: e.g. ["claude-3-haiku", "openai/o-1"]
-    - List[Dict[<LiteLLMParamsTypedDict>, Any]]: e.g. [{"model": "claude-3-haiku", "messages": [{"role": "user", "content": "Hey, how's it going?"}]}]
-
-    If [{"gpt-3.5-turbo": ["claude-3-haiku"]}] then standard format.
+    Supported direct targets may be strings, parameter-override dictionaries, or a
+    mixture of both, e.g. ``["backup-a", {"model": "backup-b", "temperature": 0}]``.
+    Standard model-group mappings such as ``[{"primary": ["backup"]}]`` remain
+    distinguishable because they do not contain a string ``model`` target.
     """
     if fallbacks is None or not isinstance(fallbacks, list) or len(fallbacks) == 0:
         return False
-    if all(isinstance(item, str) for item in fallbacks):
-        return True
-    elif all(isinstance(item, dict) for item in fallbacks):
-        for item in fallbacks:
-            for key in LiteLLMParamsTypedDict.__annotations__:
-                if key in item:
-                    # If the value is a list, it's likely a standard fallback model group mapping
-                    # (e.g. {"model": ["backup"]}) rather than a parameter override.
-                    if not isinstance(item[key], list):
-                        return True
-
-    return False
+    return all(_is_non_standard_fallback_target(item) for item in fallbacks)
 
 
 def run_non_standard_fallback_format(fallbacks: list[str] | list[dict[str, Any]], model_group: str):
