@@ -115,11 +115,7 @@ def filter_team_based_models(
     request_team_id: Final = metadata.get("user_api_key_team_id") or litellm_metadata.get("user_api_key_team_id")
     raw_excluded_deployment_ids: Final = request_kwargs.get("_excluded_deployment_ids")
     excluded_deployment_ids: Final = (
-        {
-            deployment_id
-            for deployment_id in raw_excluded_deployment_ids
-            if isinstance(deployment_id, str)
-        }
+        {deployment_id for deployment_id in raw_excluded_deployment_ids if isinstance(deployment_id, str)}
         if isinstance(raw_excluded_deployment_ids, (list, tuple, set, frozenset))
         else set()
     )

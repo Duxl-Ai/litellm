@@ -108,9 +108,7 @@ async def _get_available_fallback_request(
     if request_data.get("disable_fallbacks") is True:
         return None
 
-    max_fallbacks: Final = request_data.get(
-        "max_fallbacks", getattr(llm_router, "max_fallbacks", None)
-    )
+    max_fallbacks: Final = request_data.get("max_fallbacks", getattr(llm_router, "max_fallbacks", None))
     if max_fallbacks == 0:
         return None
 
@@ -137,10 +135,9 @@ async def _get_available_fallback_request(
     if not isinstance(fallback_model_group, list):
         return None
 
-    same_model_group_only: Final = (
-        references_provider_scoped_resource(request_data)
-        or creates_provider_scoped_resource(request_data)
-    )
+    same_model_group_only: Final = references_provider_scoped_resource(
+        request_data
+    ) or creates_provider_scoped_resource(request_data)
     alias_map: Final = getattr(llm_router, "model_group_alias", None)
     canonical_model_group: Final = resolve_model_group_alias(alias_map, model_name) or model_name
     _, authenticated_team_bucket = get_authenticated_team_context(request_data)
@@ -155,18 +152,14 @@ async def _get_available_fallback_request(
 
         if isinstance(fallback_target, str):
             fallback_model = fallback_target
-            canonical_fallback_model = (
-                resolve_model_group_alias(alias_map, fallback_model) or fallback_model
-            )
+            canonical_fallback_model = resolve_model_group_alias(alias_map, fallback_model) or fallback_model
             if canonical_fallback_model == canonical_model_group:
                 continue
         elif isinstance(fallback_target, Mapping):
             fallback_model = fallback_target.get("model")
             if not isinstance(fallback_model, str):
                 continue
-            canonical_fallback_model = (
-                resolve_model_group_alias(alias_map, fallback_model) or fallback_model
-            )
+            canonical_fallback_model = resolve_model_group_alias(alias_map, fallback_model) or fallback_model
             fallback_request.update(fallback_target)
             runtime_request.update(fallback_target)
         else:
@@ -228,11 +221,11 @@ async def _get_available_fallback_request(
         # that is consumed by the next healthy-deployment lookup; restrict that
         # lookup to deployments that actually passed this preflight validation.
         existing_exclusions = runtime_request.get("_excluded_deployment_ids")
-        excluded_deployment_ids = {
-            deployment_id
-            for deployment_id in existing_exclusions
-            if isinstance(deployment_id, str)
-        } if isinstance(existing_exclusions, (list, tuple, set, frozenset)) else set()
+        excluded_deployment_ids = (
+            {deployment_id for deployment_id in existing_exclusions if isinstance(deployment_id, str)}
+            if isinstance(existing_exclusions, (list, tuple, set, frozenset))
+            else set()
+        )
         excluded_deployment_ids.update(router_deployment_ids - validated_deployment_ids)
         runtime_request["_excluded_deployment_ids"] = sorted(excluded_deployment_ids)
 
@@ -241,13 +234,9 @@ async def _get_available_fallback_request(
         # remaining trusted server fallbacks for subsequent failures unless the
         # selected server-side dict explicitly supplied its own fallback chain.
         if "fallbacks" not in runtime_request:
-            runtime_request["fallbacks"] = list(
-                fallback_model_group[fallback_index + 1 :]
-            )
+            runtime_request["fallbacks"] = list(fallback_model_group[fallback_index + 1 :])
         fallback_depth = request_data.get("fallback_depth", 0)
-        runtime_request["fallback_depth"] = (
-            fallback_depth + 1 if isinstance(fallback_depth, int) else 1
-        )
+        runtime_request["fallback_depth"] = fallback_depth + 1 if isinstance(fallback_depth, int) else 1
         return runtime_request
 
     return None
