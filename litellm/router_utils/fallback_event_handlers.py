@@ -38,26 +38,63 @@ else:
 _REQUEST_SCOPED_STATUS_CODES: Final = frozenset((404,))
 _ROUTER_METADATA_BUCKETS: Final = ("metadata", "litellm_metadata")
 _TEAM_ID_METADATA_KEY: Final = "user_api_key_team_id"
+_API_KEY_AUTH_METADATA_KEY: Final = "user_api_key_auth"
 
 
-def get_authenticated_team_context(request_kwargs: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    """Return the effective authenticated team ID and the metadata bucket that supplied it."""
+@dataclass(frozen=True, slots=True)
+class AuthenticatedMetadataContext:
+    """Proxy-authenticated metadata that fallback overrides must not replace."""
+
+    team_source_bucket: str | None = None
+    api_key_auth_source_bucket: str | None = None
+    user_api_key_auth: Any = None
+    has_user_api_key_auth: bool = False
+
+
+def get_authenticated_team_context(
+    request_kwargs: Mapping[str, Any],
+) -> tuple[str | None, AuthenticatedMetadataContext]:
+    """Return authenticated team and API-key context before fallback overrides."""
+    authenticated_team_id: str | None = None
+    team_source_bucket: str | None = None
+    api_key_auth_source_bucket: str | None = None
+    user_api_key_auth: Any = None
+    has_user_api_key_auth = False
+
     for bucket_name in _ROUTER_METADATA_BUCKETS:
         bucket = request_kwargs.get(bucket_name)
         if not isinstance(bucket, Mapping):
             continue
-        team_id = bucket.get(_TEAM_ID_METADATA_KEY)
-        if isinstance(team_id, str):
-            return team_id, bucket_name
-    return None, None
+        if authenticated_team_id is None:
+            team_id = bucket.get(_TEAM_ID_METADATA_KEY)
+            if isinstance(team_id, str):
+                authenticated_team_id = team_id
+                team_source_bucket = bucket_name
+        if not has_user_api_key_auth and _API_KEY_AUTH_METADATA_KEY in bucket:
+            user_api_key_auth = bucket.get(_API_KEY_AUTH_METADATA_KEY)
+            api_key_auth_source_bucket = bucket_name
+            has_user_api_key_auth = True
+
+    return authenticated_team_id, AuthenticatedMetadataContext(
+        team_source_bucket=team_source_bucket,
+        api_key_auth_source_bucket=api_key_auth_source_bucket,
+        user_api_key_auth=user_api_key_auth,
+        has_user_api_key_auth=has_user_api_key_auth,
+    )
 
 
 def preserve_authenticated_team_context(
     request_kwargs: dict[str, Any],
     authenticated_team_id: str | None,
-    source_bucket: str | None,
+    source_bucket: AuthenticatedMetadataContext | str | None,
 ) -> None:
-    """Prevent fallback overrides from changing or introducing the authenticated team ID."""
+    """Keep proxy-authenticated team/API-key metadata authoritative across fallbacks."""
+    context = (
+        source_bucket
+        if isinstance(source_bucket, AuthenticatedMetadataContext)
+        else AuthenticatedMetadataContext(team_source_bucket=source_bucket)
+    )
+
     for bucket_name in _ROUTER_METADATA_BUCKETS:
         bucket = request_kwargs.get(bucket_name)
         if not isinstance(bucket, Mapping):
@@ -67,13 +104,32 @@ def preserve_authenticated_team_context(
             updated_bucket.pop(_TEAM_ID_METADATA_KEY, None)
         else:
             updated_bucket[_TEAM_ID_METADATA_KEY] = authenticated_team_id
+        if context.has_user_api_key_auth:
+            updated_bucket[_API_KEY_AUTH_METADATA_KEY] = context.user_api_key_auth
+        else:
+            updated_bucket.pop(_API_KEY_AUTH_METADATA_KEY, None)
         request_kwargs[bucket_name] = updated_bucket
 
     if authenticated_team_id is not None:
-        authoritative_bucket = source_bucket if source_bucket in _ROUTER_METADATA_BUCKETS else "metadata"
+        authoritative_bucket = (
+            context.team_source_bucket
+            if context.team_source_bucket in _ROUTER_METADATA_BUCKETS
+            else "metadata"
+        )
         bucket = request_kwargs.get(authoritative_bucket)
         updated_bucket = dict(bucket) if isinstance(bucket, Mapping) else {}
         updated_bucket[_TEAM_ID_METADATA_KEY] = authenticated_team_id
+        request_kwargs[authoritative_bucket] = updated_bucket
+
+    if context.has_user_api_key_auth:
+        authoritative_bucket = (
+            context.api_key_auth_source_bucket
+            if context.api_key_auth_source_bucket in _ROUTER_METADATA_BUCKETS
+            else "metadata"
+        )
+        bucket = request_kwargs.get(authoritative_bucket)
+        updated_bucket = dict(bucket) if isinstance(bucket, Mapping) else {}
+        updated_bucket[_API_KEY_AUTH_METADATA_KEY] = context.user_api_key_auth
         request_kwargs[authoritative_bucket] = updated_bucket
 
 
