@@ -1,0 +1,50 @@
+name: automation-list-fallback-fix-36672
+
+on:
+  push:
+    branches:
+      - automation/list-fallback-fix-36672
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/list-fallback-fix-36672
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply compatibility regression fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          handler = Path("litellm/router_utils/fallback_event_handlers.py")
+          text = handler.read_text()
+          old = '''def _is_non_standard_fallback_target(item: Any) -> bool:\n    if isinstance(item, str):\n        return True\n    if not isinstance(item, dict):\n        return False\n    model = item.get("model")\n    return isinstance(model, str)\n'''
+          new = '''def _is_non_standard_fallback_target(item: Any) -> bool:\n    if isinstance(item, str):\n        return True\n    if not isinstance(item, dict):\n        return False\n    return "model" in item\n'''
+          if old not in text:
+              raise SystemExit("target predicate not found")
+          handler.write_text(text.replace(old, new, 1))
+
+          tests = Path("tests/test_litellm/router_utils/test_mixed_fallback_format.py")
+          test_text = tests.read_text()
+          addition = '''\n\ndef test_list_valued_model_direct_fallback_remains_non_standard_format() -> None:\n    fallbacks = [{"model": ["backup-a", "backup-b"], "temperature": 0}]\n\n    assert _check_non_standard_fallback_format(fallbacks) is True\n'''
+          if "test_list_valued_model_direct_fallback_remains_non_standard_format" not in test_text:
+              tests.write_text(test_text.rstrip() + addition + "\n")
+          PY
+      - name: Install Ruff
+        run: python -m pip install ruff==0.15.3
+      - name: Format touched files
+        run: ruff format litellm/router_utils/fallback_event_handlers.py tests/test_litellm/router_utils/test_mixed_fallback_format.py
+      - name: Commit exact fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add litellm/router_utils/fallback_event_handlers.py tests/test_litellm/router_utils/test_mixed_fallback_format.py
+          git commit -m "fix(router): preserve list-valued direct fallback targets"
+          git push origin HEAD:automation/list-fallback-fix-36672
