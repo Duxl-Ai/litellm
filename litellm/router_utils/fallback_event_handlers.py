@@ -587,8 +587,7 @@ def _is_non_standard_fallback_target(item: Any) -> bool:
         return True
     if not isinstance(item, dict):
         return False
-    model = item.get("model")
-    return isinstance(model, str)
+    return "model" in item
 
 
 def _check_non_standard_fallback_format(fallbacks: list[Any] | None) -> bool:
