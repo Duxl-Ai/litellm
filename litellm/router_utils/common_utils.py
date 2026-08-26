@@ -103,7 +103,9 @@ def filter_team_based_models(
     """
     If a model has a team_id
 
-    Only use if request is from that team
+    Only use if request is from that team. Router-internal deployment exclusions
+    are also enforced here so the single-dict specific-deployment shape cannot
+    bypass the same exclusion boundary applied to model-group lists.
     """
     if request_kwargs is None:
         return healthy_deployments
@@ -111,7 +113,33 @@ def filter_team_based_models(
     metadata: Final = request_kwargs.get("metadata") or {}
     litellm_metadata: Final = request_kwargs.get("litellm_metadata") or {}
     request_team_id: Final = metadata.get("user_api_key_team_id") or litellm_metadata.get("user_api_key_team_id")
-    if request_team_id is None and _is_proxy_admin_request(request_kwargs) and isinstance(healthy_deployments, list):
+    raw_excluded_deployment_ids: Final = request_kwargs.get("_excluded_deployment_ids")
+    excluded_deployment_ids: Final = (
+        {deployment_id for deployment_id in raw_excluded_deployment_ids if isinstance(deployment_id, str)}
+        if isinstance(raw_excluded_deployment_ids, (list, tuple, set, frozenset))
+        else set()
+    )
+
+    # A specific deployment ID is returned as a single dict instead of a list.
+    # Apply both exclusion and team isolation here rather than treating the shape
+    # as an implicit authorization bypass. Proxy admins retain their existing
+    # ability to address a team-scoped deployment directly, but cannot override
+    # an explicit Router-internal exclusion boundary. The exclusion boundary is
+    # one-shot, so consume it on this lookup just like the model-group list path.
+    if isinstance(healthy_deployments, dict):
+        request_kwargs.pop("_excluded_deployment_ids", None)
+        model_info: Final = healthy_deployments.get("model_info") or {}
+        deployment_id: Final = model_info.get("id")
+        if deployment_id in excluded_deployment_ids:
+            return []
+        model_team_id: Final = model_info.get("team_id")
+        if model_team_id is None or model_team_id == request_team_id:
+            return healthy_deployments
+        if request_team_id is None and _is_proxy_admin_request(request_kwargs):
+            return healthy_deployments
+        return []
+
+    if request_team_id is None and _is_proxy_admin_request(request_kwargs):
         requested_model: Final = (
             request_kwargs.get("model") or metadata.get("model_group") or litellm_metadata.get("model_group")
         )
@@ -143,11 +171,13 @@ def filter_team_based_models(
                 llm_provider="",
             )
         if matches_requested_model:
-            return healthy_deployments
+            return [
+                deployment
+                for deployment in healthy_deployments
+                if deployment.get("model_info", {}).get("id") not in excluded_deployment_ids
+            ]
 
-    ids_to_remove: Final = set()
-    if isinstance(healthy_deployments, dict):
-        return healthy_deployments
+    ids_to_remove: Final = set(excluded_deployment_ids)
     for deployment in healthy_deployments:
         _model_info = deployment.get("model_info") or {}
         model_team_id = _model_info.get("team_id")
