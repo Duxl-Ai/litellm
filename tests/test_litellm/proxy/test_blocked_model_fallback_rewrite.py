@@ -240,3 +240,82 @@ async def test_failed_concrete_fallback_consumes_exclusions_before_next_trusted_
 
     assert fallback_hook_calls == 2
     assert response.choices[0].message.content == "safe fallback response"
+
+
+@pytest.mark.asyncio
+async def test_retry_cannot_escape_preflight_validated_concrete_deployment():
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "primary-model",
+                "litellm_params": {"model": "openai/gpt-4o", "api_key": "sk-test"},
+                "model_info": {"blocked": True},
+            },
+            {
+                "model_name": "fallback-model",
+                "litellm_params": {
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": "sk-test",
+                    "mock_response": Exception("validated fallback failed"),
+                },
+                "model_info": {"id": "validated-fallback-deployment"},
+            },
+            {
+                "model_name": "fallback-model",
+                "litellm_params": {
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": "sk-test",
+                    "mock_response": "unvalidated retry response",
+                },
+                "model_info": {"id": "unvalidated-fallback-deployment"},
+            },
+            {
+                "model_name": "safe-fallback-model",
+                "litellm_params": {
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": "sk-test",
+                    "mock_response": "safe fallback response",
+                },
+            },
+        ],
+        model_group_alias={"public-model": "primary-model"},
+        fallbacks=[{"public-model": ["fallback-model", "safe-fallback-model"]}],
+        num_retries=1,
+    )
+    hook_calls = 0
+
+    async def pin_then_attempt_retry_escape(*, model, messages, **kwargs):
+        nonlocal hook_calls
+        if model not in {
+            "fallback-model",
+            "validated-fallback-deployment",
+            "unvalidated-fallback-deployment",
+        }:
+            return None
+        hook_calls += 1
+        target = (
+            "unvalidated-fallback-deployment"
+            if hook_calls >= 3
+            else "validated-fallback-deployment"
+        )
+        return SimpleNamespace(
+            model=target,
+            messages=messages,
+            litellm_params=None,
+        )
+
+    router.async_pre_routing_hook = pin_then_attempt_retry_escape
+
+    with patch("litellm.proxy.route_llm_request.mock_testing_params_allowed", return_value=False):
+        response = await route_request(
+            data={
+                "model": "public-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            llm_router=router,
+            user_model=None,
+            route_type="acompletion",
+        )
+
+    assert hook_calls >= 3
+    assert response.choices[0].message.content == "safe fallback response"
