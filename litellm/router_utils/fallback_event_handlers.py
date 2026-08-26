@@ -377,6 +377,10 @@ async def run_async_fallback(
                 continue
             attempted.record(attempt_key)
         try:
+            # Deployment exclusions belong to the fallback target that just failed.
+            # Keep them through that target's retries, then clear them only when
+            # advancing to a distinct trusted fallback target.
+            kwargs.pop("_excluded_deployment_ids", None)
             kwargs = litellm_router.log_retry(kwargs=kwargs, e=original_exception)
             verbose_router_logger.info("Falling back to model_group = %s", mask_sensitive_structure(mg))
             if isinstance(mg, str):
