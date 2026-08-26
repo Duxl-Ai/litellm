@@ -112,9 +112,7 @@ def preserve_authenticated_team_context(
 
     if authenticated_team_id is not None:
         authoritative_bucket = (
-            context.team_source_bucket
-            if context.team_source_bucket in _ROUTER_METADATA_BUCKETS
-            else "metadata"
+            context.team_source_bucket if context.team_source_bucket in _ROUTER_METADATA_BUCKETS else "metadata"
         )
         bucket = request_kwargs.get(authoritative_bucket)
         updated_bucket = dict(bucket) if isinstance(bucket, Mapping) else {}
