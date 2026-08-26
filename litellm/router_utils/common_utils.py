@@ -105,7 +105,9 @@ def filter_team_based_models(
 
     Only use if request is from that team. Router-internal deployment exclusions
     are also enforced here so the single-dict specific-deployment shape cannot
-    bypass the same exclusion boundary applied to model-group lists.
+    bypass the same exclusion boundary applied to model-group lists. Exclusions
+    persist across retries of the same target and are cleared only when fallback
+    execution advances to the next trusted target.
     """
     if request_kwargs is None:
         return healthy_deployments
@@ -124,10 +126,8 @@ def filter_team_based_models(
     # Apply both exclusion and team isolation here rather than treating the shape
     # as an implicit authorization bypass. Proxy admins retain their existing
     # ability to address a team-scoped deployment directly, but cannot override
-    # an explicit Router-internal exclusion boundary. The exclusion boundary is
-    # one-shot, so consume it on this lookup just like the model-group list path.
+    # an explicit Router-internal exclusion boundary.
     if isinstance(healthy_deployments, dict):
-        request_kwargs.pop("_excluded_deployment_ids", None)
         model_info: Final = healthy_deployments.get("model_info") or {}
         deployment_id: Final = model_info.get("id")
         if deployment_id in excluded_deployment_ids:
@@ -195,7 +195,7 @@ def filter_team_based_models(
 
 def _deployment_supports_web_search(deployment: dict) -> bool:
     """
-    Check if a deployment supports web search.
+    Check if a deployment supports web search
 
     Priority:
     1. Check config-level override in model_info.supports_web_search
